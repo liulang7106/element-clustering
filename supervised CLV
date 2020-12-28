@@ -1,0 +1,303 @@
+
+sampledatapath1<-"E:\\LAKESEDIMENT_original.csv"
+AllVarStr1 <- "Ag,As,Au,Cu,F,Li,Nb,Pb,Rb,Sb,Sn,Th,Ti,W,Zn,Zr"
+ResponseVarStr1<-"As"
+ClusterCount1 <- 3
+CalCount1<- 50000
+ClusteringVarStr1 <- "Ag,Au,Cu,F,Li,Nb,Pb,Rb,Sb,Sn,Th,Ti,W,Zn,Zr"
+mainfun_ConstrainedCLV(sampledatapath1,AllVarStr1,ResponseVarStr1,CalCount1,ClusterCount1,ClusteringVarStr1)
+##########################################################################################################
+# TODO: this is a demo code for C & G submmision
+# 
+# Author: Jiangtao Liu
+##########################################################################################################
+
+##########################################################################################################
+##main function of this code file
+##sampledatapath: the csv file for recording the geochemical data
+##                i.e. sampledatapath<-"E:\\LAKESEDIMENT_original.csv"
+##AllVarStr       : name of varialbes. i.e.: AllVarStr <- "Ag,As,Au,Cu,F,Li,Nb,Pb,Rb,Sb,Sn,Th,Ti,W,Zn,Zr"	
+##ResponseVarStr  : name of response variable. i.e. ResponseVarStr<-"As"
+##CalCount        : calculation count. 
+##ClusterCount    : the count of clusters. i.e. ClusterCount <- 3
+##ClusteringVarStr: name of clustering varialbes. 
+##                i.e. ClusteringVarStr<-"Ag,Au,Cu,F,Li,Nb,Pb,Rb,Sb,Sn,Th,Ti,W,Zn,Zr"
+##########################################################################################################
+mainfun_ConstrainedCLV<-function(sampledatapath,AllVarStr,ResponseVarStr,CalCount,ClusterCount,ClusteringVarStr)
+{	
+	##prepair data begin#####################################################
+	##clear all variables
+	ClearAllVariables()	
+		
+	##import sample data		
+	InputData<-read.csv(sampledatapath)	
+	
+	##lg transform, z standardize and romove the bad record
+	InputData<-Init_Data_lg(InputData, AllVarStr)
+	
+	##extract variable "As" for the following calculation
+	ResponseVar<-data.frame(ExtractDataByVarName(InputData,ResponseVarStr,1))	
+	##prepair data end#######################################################	
+	
+	
+	##begin to calcualte########################################
+	SampleCount = CalCount
+	VarCount <- unlist(strsplit(ClusteringVarStr,','))
+	GroupNumber <- ClusterCount
+	VarNameList = unlist(strsplit(ClusteringVarStr,','))
+	VarNameListAll = unlist(strsplit(AllVarStr,','))
+	TargetVar= ResponseVar
+	DataSet = data.frame(InputData[VarNameList])		
+	Clustering2015_CLV(SampleCount,GroupNumber,VarCount,VarNameList,TargetVar,DataSet)
+	##end to calcualte########################################
+	
+}
+
+##########################################################################################################
+##lg transform and z-stand, then remove the bad records from data, the first two cols are X and Y, which 
+##   are the location of samples	
+##
+##data   : the inputdata for transforming, the first two cols must be X 
+##		   and Y, which are the location of samples
+##VarStr : the name of variables in data
+##########################################################################################################
+Init_Data_lg<-function(data, VarStr)
+{		
+	##import variables for lg transform
+	newdata<-data.frame(ExtractDataByVarName(data,VarStr,1))
+	newdata<-LgTranfer(newdata)		
+	
+	##rename all variables 
+	newname<-c(strsplit(AllVarStr,','))
+	colnames(newname)<-newname
+	
+	##add the coordinate (X, Y) to dataset
+	newdata<-cbind(data[1],data[2],data)	
+	
+	##remove null value in the matrix
+	newdata<-as.matrix(data.frame(newdata))
+	newdata<-InputData[!rowSums(!is.finite(newdata)),]
+	newdata<-data.frame(newdata)
+	
+	##import the variables again
+	tem_newdata<- data.frame(ExtractDataByVarName(newdata,VarStr,1))
+	
+	##z standardized	
+	tem_newdata<-ZStand(tem_newdata,ncol(tem_newdata))
+	
+	##combine the location again	
+	newdata<-cbind(newdata[1],newdata[2],tem_newdata)
+	
+	return(newdata)
+}
+
+
+##########################################################################################################
+##the key function of the constrained clustering algorithm
+##
+##SampleCount: the predined the calculation count
+##GroupNumber: the predined cluster count
+##VarCount   : the count of clustering variables
+##VarNameList: the name of clustering varialbes (geochemcial elements in current paper)
+##TargetVar  : response variable
+##DataSet    : dataset recorded the varialbes
+##########################################################################################################
+Clustering2015_CLV<-function(SampleCount,GroupNumber,VarCount,VarNameList,TargetVar,DataSet)
+{
+	##init rredis for recording temp result
+	library("rredis")
+	redisConnect()
+	if(!is.null(redisGet("Bsetvalue_CLV")))
+	{
+		tVal1<- redisGet("Bsetvalue_CLV")
+	}else
+	{
+		tVal1<- 0
+	}
+	##sample(1:3,15,replace=TRUE)
+	##Generate a group of clusters and calculate the target function
+	for(i in 1:SampleCount)
+	{
+		NumberGroup<-sample(1:GroupNumber,VarCount,replace=TRUE)
+		tObject<-Splittogroup(VarCount,GroupNumber,NumberGroup)
+		if(CheckSampleGroup(tObject)>0 && redisSAdd("tRGroupList_CLV",tObject))
+		{	
+			##get the clusters with varialbes
+			tList<-ExtractVarByIndex(DataSet,tObject)		
+			##calculate the distance
+			tVal<-GetDisByPrediciton_CLV(tList,TargetVar)
+			##record current solution in a database
+			redisSAdd("AllList_CLV",list(tVal, tObject))
+			##evaluate current solution 
+			if(tVal>tVal1)
+			{
+				tVal1<-tVal
+				print(tVal)
+				FinalGroup<-TransferIndexToName(tObject,VarNameList)				
+				redisSet("Bsetvalue_20150720",tVal1)				
+			}							
+		}			
+	}
+	return(list(tVal1,FinalGroup))
+}
+
+##########################################################################################################
+##clear the variables in memrory
+##
+##########################################################################################################
+ClearAllVariables<-function()
+{
+	##clear all variable, but remain functions
+	rm(list = setdiff(ls(), lsf.str()))
+	##rm(list = ls())
+	##check the objects in memory
+	ls(all.names = TRUE)
+	
+}
+
+##########################################################################################################
+##extract data group from dataset
+##
+##Dataset : the input dataset
+##Namelist: the variables' name list by different name groups, for example: "as,au,th","au,th","as,au"
+##NGroup  : variable group amount, the up example's group amount is 3	
+##########################################################################################################
+ExtractDataByVarName<-function(Dataset,Namelist,NGroup)
+{
+	n<-NGroup	
+	DataGroup<-list()	
+	for(i in 1:n)
+	{
+		StrTemp<-Namelist[i]		
+		StrTemp<-as.character(unlist(StrTemp))
+		StrTemp<-strsplit(StrTemp,",")
+		StrTemp<-as.character(unlist(StrTemp))
+		DataGroup[[i]]<-Dataset[c(StrTemp)]
+	}
+	
+	return(DataGroup)	
+}
+
+##########################################################################################################
+##Lg transfrom data 
+##
+##data    : input data
+##colcount: coloum counts of data
+##########################################################################################################
+LgTranfer<-function(data)
+{
+	dataoutput<-data
+	colcount<-ncol(data)
+	for(i in 1:colcount)
+	{
+		dataoutput[,i]<- log10(data[,i])
+	}
+	return(dataoutput)
+}
+
+##########################################################################################################
+##translate a index to group
+##
+##nvar  : the count of variables
+##nGroup: cluster count
+##index : the index for each variable, i.e, the nvar is 15, and  n group is 3, the index
+##        could be 3 2 1 3 1 1 3 2 2 3 2 1 1 1 3
+##output is the cluster with var name
+##########################################################################################################
+Splittogroup<-function(nVar,nGroup,index)
+{
+	VarGroup<-list()
+	indexVal<-array(1:nGroup)
+	index<-as.integer(index)
+	for(i in 1:nGroup)
+	{	
+		VarGroup[i]<-NULL		
+		objectT <- which(index==i, arr.in=TRUE)
+		VarGroup[[i]]<-objectT
+		indexVal[i]<-objectT[1]
+	}
+	Indexout<-order(indexVal)	
+	objectOut<-VarGroup
+	for(i in 1:nGroup)
+	{
+		objectOut[[i]]<-VarGroup[[Indexout[i]]]		
+	}	
+	return(objectOut)
+}
+
+##########################################################################################################
+##check if the output cluster is acceptable: no cluster is null  
+##
+##tList :  the group of var names
+##########################################################################################################
+CheckSampleGroup<-function(tList)
+{
+	count<-length(tList)
+	returnVal<-1
+	for(i in 1:count)
+	{
+		returnVal<-returnVal*length(tList[[i]])
+	}
+	return(returnVal)
+}
+
+##########################################################################################################
+##extract variables from dataset through the index (name/number)
+##
+##Var   : varialbe for clustering
+##Index : generated clusters with index
+##########################################################################################################
+ExtractVarByIndex<-function(Var,Index)
+{
+	count<-length(Index)
+	tList<-list()
+	for(i in 1:count)
+	{
+		tObject<-Var[Index[[i]]]
+		tList[[i]]<-tObject
+	}
+	return(tList)
+}
+
+##########################################################################################################
+##calculate the value of the target function: the accumulate distance from the variable to the 
+##	corresponding centroid. The distance is defined as a ratio of two correlations and the centoid is defined 
+##	as the prediction for the response variable through the variables in each cluster. more details can be 
+##  found in current paper.
+##
+##vargroup : generated clusters with variables 
+##target   : response variable
+##########################################################################################################
+GetDisByPrediciton_CLV<-function(vargroup,target)
+{
+	nGroup<-length(vargroup)
+	tSumDist<-0
+	for(i in 1:nGroup)
+	{
+		tVar<-vargroup[[i]]		
+		tVarNumber<-length(tVar)		
+		
+		##calculate the multiple correlation with response variable in current group
+		multi_cor = MultiCor(target,tVar)	
+		##calculate the correlation with response variable for each variable in current group
+		cor_list = cor(target,tVar)
+		##accumulate the ratio as distance in current group
+		for(j in 1:tVarNumber)
+		{
+			tSumDist = tSumDist + (cor_list[j]/multi_cor)^2
+		}	
+	}	
+	return(tSumDist)
+}
+
+##########################################################################################################
+##calculate the multiple correlation between a group of variables with response varialbe 
+##
+##vargroup : generated clusters with variables 
+##target   : response variable
+##########################################################################################################
+MultiCor<-function(target,vargroup)
+{
+	C1<-lm(as.matrix(data.frame(target))~ as.matrix(data.frame(vargroup)))
+	return((summary(C1))$r.squared^(0.5))
+}
